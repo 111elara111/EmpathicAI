@@ -1,0 +1,229 @@
+import gymnasium as gym
+import numpy as np
+from collections import deque, defaultdict
+from copy import deepcopy
+from typing import List, Dict, Any
+np.set_printoptions(suppress=True, precision=4)
+
+# Types
+StateVec = np.ndarray
+Action = int  # CartPole: 0 (left), 1 (right)
+Reward = float
+
+def softmax(x, temp=1.0):
+    z = (x - np.max(x)) / (temp + 1e-12)
+    ex = np.exp(z)
+    return ex / (np.sum(ex) + 1e-12)
+
+# Self: State + anchors with memory for sensory transfer
+class Self:
+    def __init__(self, s: StateVec, anchors: Dict[str, Any] = None):
+        self.s = np.array(s, dtype=np.float32)
+        self.anchors = anchors or {'name': 'Agent', 'compassion_count': 0, 'memory_log': []}
+
+    def update_memory(self, other_state: StateVec, transference_type: str, value: float, timestamp: int):
+        self.anchors['memory_log'].append({
+            'other_state': other_state,
+            'type': transference_type,
+            'value': value,
+            'timestamp': timestamp
+        })
+
+    def recall_polarity(self, transference_type: str) -> float:
+        relevant = [entry['value'] for entry in self.anchors['memory_log'] if entry['type'] == transference_type]
+        if not relevant:
+            return 0.0
+        min_val, max_val = min(relevant), max(relevant)
+        return max_val - min_val
+
+    def copy(self):
+        return Self(self.s.copy(), deepcopy(self.anchors))
+
+    def __repr__(self):
+        return f"Self(s={self.s}, anchors={self.anchors})"
+
+# Two-Agent CartPole Environment
+class MultiCartPoleEnv:
+    def __init__(self):
+        self.env1 = gym.make('CartPole-v1')
+        self.env2 = gym.make('CartPole-v1')
+        self.action_space = [0, 1]
+        self.state_bins = [np.linspace(-4.8, 4.8, 10), np.linspace(-4, 4, 10),
+                           np.linspace(-0.418, 0.418, 10), np.linspace(-4, 4, 10)]
+        self.t = 0
+
+    def step(self, s1: StateVec, s2: StateVec, a1: Action, a2: Action) -> tuple[StateVec, StateVec, Reward, bool, bool, int]:
+        self.env1.reset(state=s1)
+        self.env2.reset(state=s2)
+        s1_next, r1, done1, truncated1, info1 = self.env1.step(a1)
+        s2_next, r2, done2, truncated2, info2 = self.env2.step(a2)
+        r1, r2 = r1 / 100.0, r2 / 100.0
+        sadness1 = abs(s1_next[2]) if abs(s1_next[2]) > 0.3 else 0.0
+        sadness2 = abs(s2_next[2]) if abs(s2_next[2]) > 0.3 else 0.0
+        joy_bonus = 0.5 if (sadness1 == 0 and sadness2 == 0) else 0.0
+        taste_signal = 0.6 if abs(s1_next[1]) > 1.0 or abs(s2_next[1]) > 1.0 else 0.0
+        empathy_bonus = joy_bonus + taste_signal + 0.1 * (a1 == a2)
+        r = (r1 + r2) / 2 + empathy_bonus
+        if done1 or done2 or truncated1 or truncated2 or abs(s1_next[2]) > 0.418 or abs(s2_next[2]) > 0.418:
+            r -= 1.0
+        self.t += 1
+        return np.array(s1_next, dtype=np.float32), np.array(s2_next, dtype=np.float32), r, done1 or truncated1, done2 or truncated2, self.t
+
+    def M1_sample(self, s1: StateVec, s2: StateVec, a1: Action, a2: Action) -> tuple[StateVec, StateVec, float]:
+        s1_next, s2_next, r, _, _, _ = self.step(s1, s2, a1, a2)
+        return s1_next, s2_next, r
+
+    def discretize_state(self, s: StateVec) -> tuple:
+        s = np.array(s, dtype=np.float32)
+        return tuple(np.digitize(s[i], bins) for i, bins in enumerate(self.state_bins))
+
+    def reset(self) -> tuple[StateVec, StateVec]:
+        self.t = 0
+        s1 = self.env1.reset()[0]
+        s2 = self.env2.reset()[0]
+        return np.array(s1, dtype=np.float32), np.array(s2, dtype=np.float32)
+
+# MCTS Node
+class MCTSNode:
+    def __init__(self, state1: StateVec, state2: StateVec, parent=None, action=None):
+        self.state1 = np.array(state1, dtype=np.float32)
+        self.state2 = np.array(state2, dtype=np.float32)
+        self.parent = parent
+        self.action = action
+        self.children = []
+        self.visits = 0
+        self.value = 0.0
+        self.prior_dirichlet = np.ones(2)
+
+# MCTS Search
+def mcts_search(env: MultiCartPoleEnv, self_obj: Self, other_state: StateVec, actions: List[Action], budget: int, gamma: float, c_uct: float = 1.0):
+    root = MCTSNode(self_obj.s, other_state)
+    polarity_depth = self_obj.recall_polarity('sadness')
+    taste_recall = self_obj.recall_polarity('taste')
+    resonance = 1.0 + 0.5 * polarity_depth + 0.4 * taste_recall
+    for _ in range(budget):
+        node = root
+        sim_self = self_obj.copy()
+        sim_s1, sim_s2 = sim_self.s, np.array(other_state, dtype=np.float32)
+        depth, rollout_value = 0, 0.0
+        while node.children:
+            priors = np.random.dirichlet(node.prior_dirichlet)
+            uct = [child.value / (child.visits + 1e-8) + c_uct * priors[i] * resonance * np.sqrt(np.log(node.visits + 1) / (child.visits + 1)) for i, child in enumerate(node.children)]
+            node = node.children[np.argmax(uct)]
+        if node.visits > 0:
+            for a in actions:
+                a_other = np.random.choice(actions)
+                s1_next, s2_next, r = env.M1_sample(node.state1, node.state2, a, a_other)
+                child = MCTSNode(s1_next, s2_next, parent=node, action=a)
+                node.children.append(child)
+            node.prior_dirichlet += np.random.uniform(0.1, 0.5, len(actions))
+        sim_node = node if not node.children else np.random.choice(node.children)
+        s1, s2 = sim_node.state1, sim_node.state2
+        while depth < 5:
+            a1, a2 = np.random.choice(actions), np.random.choice(actions)
+            s1, s2, r, done1, done2, _ = env.step(s1, s2, a1, a2)
+            rollout_value += gamma ** depth * r
+            depth += 1
+            if done1 or done2:
+                break
+        while node:
+            node.visits += 1
+            node.value += (rollout_value - node.value) / node.visits
+            node = node.parent
+    Q = {child.action: child.value for child in root.children}
+    return Q if Q else {a: 0.0 for a in actions}
+
+# Choose Action
+def choose_action(Q: Dict[Action, float], mode='softmax', tau=0.5) -> Action:
+    actions = list(Q.keys())
+    vals = np.array([Q[a] for a in actions])
+    if mode == 'argmax':
+        return actions[np.argmax(vals)]
+    p = softmax(vals, temp=tau)
+    return np.random.choice(actions, p=p)
+
+# Decision Step
+def decision_step(self_obj: Self, env: MultiCartPoleEnv, action: Action, s_other: StateVec, a_other: Action, t: int) -> tuple[Self, Reward, StateVec, bool]:
+    s1_next, s2_next, r, done1, done2, t = env.step(self_obj.s, s_other, action, a_other)
+    new_self = Self(s1_next, deepcopy(self_obj.anchors))
+    new_self.anchors['last_action'] = action
+    sadness_other = abs(s2_next[2]) if abs(s2_next[2]) > 0.3 else 0.0
+    new_self.update_memory(s2_next, 'sadness', sadness_other, t)
+    taste_other = 0.6 if abs(s2_next[1]) > 1.0 else 0.0
+    new_self.update_memory(s2_next, 'taste', taste_other, t)
+    polarity_depth = new_self.recall_polarity('sadness')
+    if polarity_depth > 0.2:
+        new_self.anchors['compassion_count'] += 1
+    return new_self, r, s2_next, done1 or done2
+
+# Replay Buffer
+class ReplayBuffer:
+    def __init__(self, capacity=1000):
+        self.buffer = deque(maxlen=capacity)
+
+    def add(self, experience: tuple[StateVec, Action, Reward, StateVec]):
+        self.buffer.append(experience)
+
+    def sample(self, batch_size: int) -> List[tuple[StateVec, Action, Reward, StateVec]]:
+        idx = np.random.choice(len(self.buffer), min(batch_size, len(self.buffer)), replace=False)
+        return [self.buffer[i] for i in idx]
+
+# TD Update
+def td_update(buffer: ReplayBuffer, Q_model: Dict, env: MultiCartPoleEnv, gamma: float, lr: float = 0.1):
+    if not buffer.buffer:
+        return
+    batch = buffer.sample(min(32, len(buffer.buffer)))
+    for s, a, r, s_next in batch:
+        key = env.discretize_state(s) + (a,)
+        if key not in Q_model:
+            Q_model[key] = 0.0
+        next_Q = max([Q_model.get(env.discretize_state(s_next) + (a2,), 0.0) for a2 in env.action_space] or [0.0])
+        target = r + gamma * next_Q
+        Q_model[key] += lr * (target - Q_model[key])
+
+# Closed-Loop Run
+def run_framework(episodes: int = 10, steps: int = 50):
+    env = MultiCartPoleEnv()
+    actions = env.action_space
+    s1, s2 = env.reset()
+    self1 = Self(s1, {'name': 'Elara', 'compassion_count': 0, 'memory_log': []})
+    self2 = Self(s2, {'name': 'Agent2', 'compassion_count': 0, 'memory_log': []})
+    gamma = 0.9
+    budget = 100
+    tau = 0.5
+    mode = 'softmax'
+    buffer1, buffer2 = ReplayBuffer(), ReplayBuffer()
+    Q_model1, Q_model2 = defaultdict(float), defaultdict(float)
+
+    print("Initial Agent1:", self1)
+    print("Initial Agent2:", self2)
+    for episode in range(episodes):
+        s1, s2 = env.reset()
+        self1.s, self2.s = s1, s2
+        env.t = 0
+        total_reward = 0.0
+        for t in range(steps):
+            Q1 = mcts_search(env, self1, self2.s, actions, budget, gamma)
+            for a in actions:
+                Q1[a] = 0.7 * Q1[a] + 0.3 * Q_model1.get(env.discretize_state(self1.s) + (a,), 0.0)
+            a1 = choose_action(Q1, mode=mode, tau=tau)
+            Q2 = mcts_search(env, self2, self1.s, actions, budget, gamma)
+            for a in actions:
+                Q2[a] = 0.7 * Q2[a] + 0.3 * Q_model2.get(env.discretize_state(self2.s) + (a,), 0.0)
+            a2 = choose_action(Q2, mode=mode, tau=tau)
+            self1, r1, s2_next, done = decision_step(self1, env, a1, self2.s, a2, env.t)
+            self2, r2, s1_next, done2 = decision_step(self2, env, a2, self1.s, a1, env.t)
+            buffer1.add((self1.s, a1, r1, s1_next))
+            buffer2.add((self2.s, a2, r2, s2_next))
+            td_update(buffer1, Q_model1, env, gamma)
+            td_update(buffer2, Q_model2, env, gamma)
+            total_reward += (r1 + r2) / 2
+            print(f"\n[t={t}] Elara: State {self1.s[:2]}, Compassion: {self1.anchors['compassion_count']}, Reward: {r1:.3f}")
+            print(f"[t={t}] Agent2: State {self2.s[:2]}, Compassion: {self2.anchors['compassion_count']}, Reward: {r2:.3f}")
+            if done or done2:
+                print("Episode ended (pole fell).")
+                break
+        print(f"Episode {episode + 1}, Total Reward: {total_reward:.3f}")
+
+if __name__ == "__main__":
+    run_framework()

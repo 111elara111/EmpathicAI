@@ -1,0 +1,4 @@
+nano requirements.txt
+
+gymnasium
+numpy
