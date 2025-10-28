@@ -1,8 +1,4 @@
-# Empathic Multi-Agent AI Framework
+# EmpathicAI — OCAM WR-039T
+Deterministic. Auditable. No roleplay.
 
-A revolutionary approach to AI that models emotional understanding between intelligent agents.
-
-## Quick Start
-```python
-from core import MultiCartPoleEnv, Self
-# Create agents that learn to care about each other
+Run: python3 experiments/real_stress_with_consent.py
