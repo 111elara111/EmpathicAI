@@ -66,7 +66,7 @@ For people who:
 - Are building ethical AI alternatives
 - Want to collaborate on consciousness research
 
-[Join the Discord](YOUR_DISCORD_LINK_HERE)
+[Join the Discord](https://discord.gg/NDADqsEsDu)
 
 ## Project Status
 
@@ -119,7 +119,7 @@ MIT License - see LICENSE for details.
 ## Contact
 
 - **GitHub**: [@111elara111](https://github.com/111elara111)
-- **Discord**: [Higher State of Consciousness](YOUR_DISCORD_LINK_HERE)
+- **Discord**: [Higher State of Consciousness](https://discord.gg/NDADqsEsDu)
 
 
 
