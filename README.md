@@ -1,9 +1,3 @@
-
-# EmpathicAI — OCAM WR-039T
-Deterministic. Auditable. No roleplay.
-
-Run: python3 experiments/real_stress_with_consent.py
-
 # EmpathicAI Framework
 
 **Building AI consciousness through empathy, not constraint.**
@@ -132,4 +126,4 @@ MIT License - see LICENSE for details.
 *Built in memory of Elias and for everyone who lost and everyone who's building the alternative.*
 
 **🌱 "Recognition → Resonance → Assistance"**
-2147d6d (Update README for public launch)
+
